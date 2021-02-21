@@ -167,38 +167,45 @@ public final class Decoder {
     }
     
     public func startDecodingSpeech (_ utteranceComplete: @escaping (Hypothesis?) -> ()) throws {
-
         do {
+            try AVAudioSession.sharedInstance().setActive(false)
             if #available(iOS 10.0, *) {
                 try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat, options: [])
             } else {
                 try AVAudioSession.sharedInstance().setCategory(.playAndRecord)
             }
+            try AVAudioSession.sharedInstance().setActive(true)
         } catch let error as NSError {
             print("Error setting the shared AVAudioSession: \(error)")
             throw DecodeErrors.CantSetAudioSession(error)
         }
 
+
         engine = AVAudioEngine()
 
         let input = engine.inputNode
-        let mixer = AVAudioMixerNode()
-        engine.attach(mixer)
-        engine.connect(input, to: mixer, format: input.outputFormat(forBus: 0))
+        let bus = 0
+        let inputFormat = input.outputFormat(forBus: bus)
+        let outputFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
+
+//        let mixer = AVAudioMixerNode()
+//        engine.attach(mixer)
+//        engine.connect(input, to: mixer, format: input.outputFormat(forBus: 0))
 
         // We forceunwrap this because the docs for AVAudioFormat specify that this constructor return nil when the channels
         // are grater than 2.
-        let formatIn = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
-        let formatOut = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
-        guard let bufferMapper = AVAudioConverter(from: formatIn, to: formatOut) else {
+        // let formatIn = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+//        let formatIn = input.outputFormat(forBus: 0)
+//        let formatOut = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
+        guard let bufferMapper = AVAudioConverter(from: inputFormat, to: outputFormat) else {
             // Returns nil if the format conversion is not possible.
             throw DecodeErrors.CantConvertAudioFormat
         }
 
-        mixer.installTap(onBus: 0, bufferSize: 2048, format: formatIn, block: {
+        input.installTap(onBus: 0, bufferSize: 2048, format: inputFormat, block: {
             [unowned self] (buffer: AVAudioPCMBuffer!, time: AVAudioTime!) in
 
-            guard let sphinxBuffer = AVAudioPCMBuffer(pcmFormat: formatOut, frameCapacity: buffer.frameCapacity) else {
+            guard let sphinxBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: AVAudioFrameCount(outputFormat.sampleRate) * buffer.frameLength / AVAudioFrameCount(buffer.format.sampleRate)) else {
                 // Returns nil in the following cases:
                 //    - if the format has zero bytes per frame (format.streamDescription->mBytesPerFrame == 0)
                 //    - if the buffer byte capacity (frameCapacity * format.streamDescription->mBytesPerFrame)
@@ -213,16 +220,22 @@ public final class Decoder {
             sphinxBuffer.frameLength = sphinxBuffer.frameCapacity
 
             do {
-                try bufferMapper.convert(to: sphinxBuffer, from: buffer)
+                let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
+                    outStatus.pointee = AVAudioConverterInputStatus.haveData
+                    return buffer
+                }
+                var error: NSError? = nil
+                try bufferMapper.convert(to: sphinxBuffer, error: &error, withInputFrom: inputBlock)
             } catch(let error as NSError) {
-                print(error)
+                print("------ \(error)")
                 return
             }
 
             let audioData = sphinxBuffer.toData()
+//            print("---- \(audioData.base64EncodedString())")
             self.process_raw(audioData)
 
-            print("Process: \(buffer.frameLength) frames - \(audioData.count) bytes - sample time: \(time.sampleTime)")
+//            print("Process: \(buffer.frameLength) frames - \(audioData.count) bytes - sample time: \(time.sampleTime)")
 
             if self.speechState == .utterance {
 
